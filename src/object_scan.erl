@@ -34,6 +34,11 @@ modified_before_pred(Threshold) ->
 	    riak_core_util:compare_dates(Threshold, Modified)
     end.
 
+all_pred(Preds) ->
+    fun (X) ->
+	    lists:all(fun (Pred) -> Pred(X) end, Preds)
+    end.
+
 any_pred(Preds) ->
     fun (X) ->
 	    lists:any(fun (Pred) -> Pred(X) end, Preds)
@@ -55,8 +60,24 @@ object_spec_list() ->
      {siblings, $s, "siblings", integer, "Fold objects with at least <siblings> siblings"},
      {modified_before, $B, "modified_before", string, "Fold objects last modified before <modified_before> (using RFC1123)"},
      {cookie, $c, "cookie", string, "Cookie of Riak cluster"},
-     {file, $f, "file", string, "Output to <file> on target nodes"}
+     {file, $f, "file", string, "Output to <file> on target nodes"},
+     {vnodes, $v, "vnodes", string, "Comma separated list of vnodes to fold"}
     ].
+
+vnode_pred(VNodes) ->
+    fun ({VNode, _}) ->
+	    lists:member(VNode, VNodes)
+    end.
+
+parse_vnodes(VNodes) ->
+    lists:map(fun (Str) -> case (string:to_integer(Str)) of {VNode, _} when is_integer(VNode) -> VNode end end,
+	      string:tokens(VNodes, ",")).
+
+process_vnode_pred_opt() ->
+    fun ({vnodes, VNodes}, Preds) ->
+	    [vnode_pred(parse_vnodes(VNodes)) | Preds];
+	(_, Preds) -> Preds
+    end.
 
 process_pred_opt() ->
     fun ({object_size, Threshold}, Preds) ->
@@ -111,12 +132,14 @@ main(Args) ->
     case getopt:parse(object_spec_list(), Args) of
 	{ok, {Opts, [NodeName]}} ->
 	    Node = list_to_atom(NodeName),
+	    VNodePreds = lists:foldl(process_vnode_pred_opt(), [], Opts),
+	    VNodePred = all_pred(VNodePreds),
 	    Preds = lists:foldl(process_pred_opt(), [], Opts),
 	    Pred = any_pred(Preds),
 	    Funs = lists:foldl(process_fun_opt(), [], Opts),
 	    Fun = compose_funs(Funs),
 	    Cookie = proplists:get_value(cookie, Opts, "riak"),
-	    VNode_Fold = fold_vnodes(Node),
+	    VNode_Fold = filter_fold(fold_vnodes(Node), VNodePred),
 	    Object_Fold = filter_fold(fold_objects_with_size(), Pred),
 	    Fold = map_fold(compose_folds(VNode_Fold, Object_Fold), Fun),
 	    connect(NodeName, Cookie),
